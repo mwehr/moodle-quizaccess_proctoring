@@ -36,4 +36,8 @@ if ($hassiteconfig) {
     $settings->add(new admin_setting_configtext('quizaccess_proctoring/autoreconfigureimagewidth',
         get_string('setting:camshotwidth', 'quizaccess_proctoring'),
         get_string('setting:camshotwidth_desc', 'quizaccess_proctoring'), 230, PARAM_INT));
+
+    $settings->add(new admin_setting_configtext('quizaccess_proctoring/imagelifetime',
+        get_string('setting:imagelifetime', 'quizaccess_proctoring'),
+        get_string('setting:imagelifetime_desc', 'quizaccess_proctoring'), 6, PARAM_INT));
 }

@@ -25,6 +25,7 @@
 
 require_once (__DIR__ . '/../../../../config.php');
 require_once ($CFG->dirroot . '/lib/tablelib.php');
+require_once ($CFG->dirroot . '/mod/quiz/accessrule/proctoring/locallib.php');
 
 // Get vars.
 $courseid = required_param('courseid', PARAM_INT);
@@ -32,6 +33,7 @@ $cmid = required_param('cmid', PARAM_INT);
 $studentid = optional_param('studentid', '', PARAM_INT);
 $reportid = optional_param('reportid', '', PARAM_INT);
 $logaction = optional_param('logaction', '', PARAM_TEXT);
+$status = optional_param('status', '', PARAM_INT);
 
 $context = context_module::instance($cmid, MUST_EXIST);
 
@@ -85,46 +87,27 @@ if (has_capability('quizaccess/proctoring:deletecamshots', $context, $USER->id)
     && $reportid != null
     && !empty($logaction)
 ) {
-    $DB->set_field('quizaccess_proctoring_logs', 'userid', 0, array('courseid' => $courseid, 'quizid' => $cmid, 'userid' => $studentid));
-
-    // Delete users file (webcam images).
-    $filesql = 'SELECT * FROM {files} 
-    WHERE userid = :studentid  AND contextid = :contextid  AND component = \'quizaccess_proctoring\' AND filearea = \'picture\'';
-
-    $params = array();
-    $params["studentid"] = $studentid;
-    $params["contextid"] = $context->id;
-
-    $usersfile = $DB->get_records_sql($filesql, $params);
+    $logEntryList = $DB->get_records_sql(
+        'SELECT * FROM {quizaccess_proctoring_logs} where status = :status',
+        $params= ['status' => $status]);
 
     $fs = get_file_storage();
-    foreach ($usersfile as $file):
-        // Prepare file record object
-        $fileinfo = array(
-            'component' => 'quizaccess_proctoring',
-            'filearea' => 'picture',     // Usually = table name.
-            'itemid' => $file->itemid,               // Usually = ID of row in table.
-            'contextid' => $context->id, // ID of context.
-            'filepath' => '/',           // any path beginning and ending in /.
-            'filename' => $file->filename); // any filename.
+    foreach ($logEntryList as $logEntry) {
+        proctoring_delete_image($logEntry->webcampicture, $context, $fs);
+    }
 
-        // Get file
-        $file = $fs->get_file($fileinfo['contextid'], $fileinfo['component'], $fileinfo['filearea'],
-            $fileinfo['itemid'], $fileinfo['filepath'], $fileinfo['filename']);
+    // Remove logs from quizaccess_proctoring_logs
+    $DB->delete_records('quizaccess_proctoring_logs', array('courseid' => $courseid, 'quizid' => $cmid, 'userid' => $studentid, 'status' => $status));
 
-        // Delete it if it exists
-        if ($file) {
-            $file->delete();
-        }
-    endforeach;
-    $url2 = new moodle_url(
+    redirect(
+        new moodle_url(
         '/mod/quiz/accessrule/proctoring/report.php',
-        array(
-            'courseid' => $courseid,
-            'cmid' => $cmid
-        )
-    );
-    redirect($url2, 'Images deleted!', -11);
+            array(
+                'courseid' => $courseid,
+                'cmid' => $cmid
+            )
+        ),
+        'Images deleted!', -11);
 }
 
 if (has_capability('quizaccess/proctoring:viewreport', $context, $USER->id) && $cmid != null && $courseid != null) {
@@ -194,7 +177,7 @@ if (has_capability('quizaccess/proctoring:viewreport', $context, $USER->id) && $
         $sql = "SELECT e.id as reportid, e.userid as studentid, e.webcampicture as webcampicture, e.status as status,
         e.timemodified as timemodified, u.firstname as firstname, u.lastname as lastname, u.email as email
         from {quizaccess_proctoring_logs} e INNER JOIN {user} u  ON u.id = e.userid
-        WHERE e.courseid = '$courseid' AND e.quizid = '$cmid' AND u.id = '$studentid'";
+        WHERE e.courseid = '$courseid' AND e.quizid = '$cmid' AND u.id = '$studentid' order by status, timemodified";
 
         $sqlexecuted = $DB->get_recordset_sql($sql);
         echo '<h3>' . get_string('picturesusedreport', 'quizaccess_proctoring') . '</h3>';
@@ -219,19 +202,8 @@ if (has_capability('quizaccess/proctoring:viewreport', $context, $USER->id) && $
         $tablepictures->set_attribute('class', 'generaltable generalbox reporttable');
 
         $tablepictures->setup();
-        $pictures = '';
 
         $user = core_user::get_user($studentid);
-
-        foreach ($sqlexecuted as $info) {
-            $d = basename($info->webcampicture, '.png');
-            $pictures .= $info->webcampicture
-                ? '<a href="' . $info->webcampicture . '" data-lightbox="procImages"' . ' data-title ="' . $info->firstname . ' ' . $info->lastname .'">'.
-                      '<img width="100" src="' . $info->webcampicture . '" alt="' . $info->firstname . ' '
-                     . $info->lastname . '" data-lightbox="' . basename($info->webcampicture, '.png') .'"/>
-                   </a>'
-                : '';
-        }
 
         $userinfo = '<table border="0" width="110" height="160px">
                         <tr height="120" style="background-color: transparent;">
@@ -243,13 +215,44 @@ if (has_capability('quizaccess/proctoring:viewreport', $context, $USER->id) && $
                         </tr>
                     </table>';
 
+        $currentAttempt = 0;
+        $attempCnt = 1;
+        $pictures = '';
+        foreach ($sqlexecuted as $info) {
+            if($currentAttempt == 0 ){
+                $currentAttempt = $info->status;
+                $pictures = '<div class="attemptinfo">'
+                                . get_string('attemptstarted', 'quizaccess_proctoring'). ': '
+                                . userdate($info->timemodified)
+                            .'</div>';
+            }elseif ($currentAttempt != $info->status){
+                $datapictures = array(
+                    ($attempCnt == 1)?$userinfo:null,
+                    $pictures,
+                    '<a onclick="return confirm(`Are you sure want to delete the pictures?`)" class="text-danger" href="?courseid=' . $courseid .
+                    '&quizid=' . $cmid . '&cmid=' . $cmid . '&studentid=' . $info->studentid . '&reportid=' . $info->reportid .'&status=' . $currentAttempt . '&logaction=delete">Delete images</a>'
+                );
+                $tablepictures->add_data($datapictures);
+                $pictures = '<div>Attempt started: '. userdate($info->timemodified) .'</div>';
+                $attempCnt++;
+                $currentAttempt = $info->status;
+            }else {
+                if (!empty($info->webcampicture)) {
+                    $image_url = proctoring_get_image_url($info->webcampicture, $context, 'picture');
+                    $pictures .= '<a href="' . $image_url . '" data-lightbox="' . $currentAttempt . '"' . ' data-title ="' . $info->firstname . ' ' . $info->lastname . '">' .
+                        '<img width="100" src="' . $image_url . '" alt="' . $info->firstname . ' ' . $info->lastname . '"/>
+                       </a>';
+                }
+            }
+        }
         $datapictures = array(
-            $userinfo,
+            ($attempCnt == 1)?$userinfo:null,
             $pictures,
             '<a onclick="return confirm(`Are you sure want to delete the pictures?`)" class="text-danger" href="?courseid=' . $courseid .
-            '&quizid=' . $cmid . '&cmid=' . $cmid . '&studentid=' . $info->studentid . '&reportid=' . $info->reportid . '&logaction=delete">Delete images</a>'
+            '&quizid=' . $cmid . '&cmid=' . $cmid . '&studentid=' . $info->studentid . '&reportid=' . $info->reportid .'&status=' . $currentAttempt . '&logaction=delete">Delete images</a>'
         );
         $tablepictures->add_data($datapictures);
+
         $tablepictures->finish_html();
     }
 

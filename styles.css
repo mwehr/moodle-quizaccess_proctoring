@@ -219,3 +219,7 @@ body.lb-disable-scrolling {
     /* stylelint-enable */
     opacity: 1;
 }
+
+.attemptinfo{
+    padding-bottom: 5px;
+}
